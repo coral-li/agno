@@ -17,6 +17,113 @@ from agno.utils.log import log_debug, log_info
 
 
 class BaseAPIApp(ABC):
+    """
+    Abstract base class for creating Agno app integrations across different platforms and interfaces.
+
+    This class provides the foundational framework for exposing Agno agents and teams through
+    various platforms (web APIs, chat platforms, messaging services, etc.). It handles common
+    functionality like initialization, monitoring, platform registration, and serving, while
+    allowing subclasses to implement platform-specific routing logic.
+
+    Architecture:
+    The BaseAPIApp follows a template method pattern where:
+    - Common functionality (initialization, serving, monitoring) is implemented in the base class
+    - Platform-specific routing is implemented by subclasses via abstract methods
+    - Each integration gets both sync and async router support automatically
+
+    Key Features Provided:
+    - **Agent/Team Management**: Automatic initialization and ID assignment
+    - **Platform Registration**: Built-in monitoring and platform integration
+    - **FastAPI Integration**: Creates FastAPI apps with middleware, CORS, error handling
+    - **Serving**: uvicorn-based serving with configurable host/port
+    - **Exception Handling**: Standardized HTTP and general exception handling
+    - **Session Management**: App ID generation and tracking
+
+    Abstract Methods (must be implemented by subclasses):
+    - `get_router()`: Returns APIRouter for synchronous endpoints
+    - `get_async_router()`: Returns APIRouter for asynchronous endpoints
+
+    Args:
+        agent: Single Agent instance to expose (mutually exclusive with team)
+        team: Single Team instance to expose (mutually exclusive with agent)
+        settings: API configuration settings
+        api_app: Custom FastAPI instance (optional)
+        router: Custom APIRouter instance (optional)
+        monitoring: Enable platform monitoring and registration
+        app_id: Unique identifier for the application
+        name: Human-readable name for the application
+        description: Description of the application
+
+    Raises:
+        ValueError: If neither agent nor team is provided, or if both are provided
+        NotImplementedError: If abstract methods are not implemented by subclasses
+
+    Example - Creating a Custom Integration:
+        ```python
+        from fastapi.routing import APIRouter
+        from agno.app.base import BaseAPIApp
+
+        class MyPlatformAPI(BaseAPIApp):
+            type = "myplatform"
+
+            def get_router(self) -> APIRouter:
+                router = APIRouter()
+
+                @router.post("/my-endpoint")
+                def handle_message(message: str):
+                    if self.agent:
+                        return self.agent.run(message)
+                    elif self.team:
+                        return self.team.run(message)
+
+                return router
+
+            def get_async_router(self) -> APIRouter:
+                router = APIRouter()
+
+                @router.post("/my-async-endpoint")
+                async def handle_message_async(message: str):
+                    if self.agent:
+                        return await self.agent.arun(message)
+                    elif self.team:
+                        return await self.team.arun(message)
+
+                return router
+
+        # Usage
+        agent = Agent(name="assistant")
+        app = MyPlatformAPI(agent=agent)
+        app.serve("app:api", host="0.0.0.0", port=8000)
+        ```
+
+    Existing Integrations:
+    - **FastAPIApp**: General-purpose REST API (type="fastapi")
+    - **SlackAPI**: Slack bot integration (type="slack")
+    - **WhatsappAPI**: WhatsApp bot integration (type="whatsapp")
+    - **AGUIApp**: Agno GUI interface integration (type="agui")
+
+    Platform-Specific Router Implementation:
+        Each integration should implement routers that handle platform-specific:
+        - Message formats and protocols
+        - Authentication and webhooks
+        - File upload handling
+        - Response formatting
+        - Platform-specific features (buttons, cards, etc.)
+
+    Automatic Features:
+        - CORS middleware with permissive settings
+        - HTTP and general exception handling
+        - Agent/team initialization with proper IDs
+        - Platform registration for monitoring
+        - FastAPI app creation with docs endpoints
+        - uvicorn serving with configurable options
+
+    Note:
+        - Only one of agent or team can be provided (not both)
+        - The `type` class attribute should be set to identify the integration
+        - Both sync and async routers are required for complete functionality
+        - Platform registration can be disabled via monitoring=False
+    """
     type: Optional[str] = None
 
     def __init__(

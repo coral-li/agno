@@ -19,6 +19,91 @@ logger = logging.getLogger(__name__)
 
 
 class FastAPIApp(BaseAPIApp):
+    """
+    FastAPI wrapper for Agno AI components that automatically generates REST API endpoints.
+
+    This class provides a production-ready REST API interface for Agno agents, teams, and workflows
+    using the FastAPI framework. It automatically generates endpoints for communication, handles
+    multimodal inputs, supports streaming responses, and manages sessions.
+
+    Key Features:
+    - **Automatic Endpoint Generation**: Creates REST API endpoints without manual configuration
+    - **Multi-Component Support**: Works with agents, teams, and workflows
+    - **Multimodal Input**: Handles text, images, audio, video, and document uploads
+    - **Streaming Responses**: Real-time response streaming for chat-like interactions
+    - **Session Management**: Built-in session and user tracking
+    - **File Processing**: Automatic processing of various file types (PDF, CSV, DOCX, images, etc.)
+    - **Knowledge Base Integration**: Automatically loads documents into agent knowledge bases
+    - **Async/Sync Support**: Both synchronous and asynchronous endpoint variants
+
+    Generated Endpoints:
+    - `GET /status`: API health check
+    - `POST /runs`: Universal endpoint for agent/team/workflow communication
+      - Supports file uploads, streaming, session management
+      - Routes to appropriate component based on agent_id/team_id/workflow_id
+
+    Args:
+        agents: List of Agent instances to expose via API
+        teams: List of Team instances to expose via API
+        workflows: List of Workflow instances to expose via API
+        settings: API configuration settings
+        api_app: Custom FastAPI instance (optional)
+        router: Custom APIRouter instance (optional)
+        app_id: Unique identifier for the application
+        name: Human-readable name for the application
+        description: Description of the application
+        monitoring: Enable platform monitoring and registration
+
+    Raises:
+        ValueError: If none of agents, teams, or workflows are provided
+
+    Example:
+        ```python
+        from agno import Agent
+        from agno.app.fastapi import FastAPIApp
+
+        # Create an agent
+        agent = Agent(name="assistant", model="gpt-4")
+
+        # Create FastAPI app with automatic endpoints
+        app = FastAPIApp(agents=[agent])
+
+        # Serve the API
+        app.serve("app:api", host="0.0.0.0", port=8000)
+
+        # Now available:
+        # GET  http://localhost:8000/status
+        # POST http://localhost:8000/runs?agent_id=assistant
+        ```
+
+    Usage with Multiple Components:
+        ```python
+        from agno import Agent, Team
+        from agno.app.fastapi import FastAPIApp
+
+        agent1 = Agent(name="researcher")
+        agent2 = Agent(name="writer")
+        team = Team(name="content-team", members=[agent1, agent2])
+
+        app = FastAPIApp(agents=[agent1, agent2], teams=[team])
+        app.serve("app:api")
+
+        # Access via:
+        # POST /runs?agent_id=researcher
+        # POST /runs?team_id=content-team
+        ```
+
+    File Upload Support:
+        The `/runs` endpoint automatically handles:
+        - Images: PNG, JPEG, WebP (converted to base64 for AI processing)
+        - Audio: WAV, MP3, MPEG (converted to base64)
+        - Video: MP4, WebM, WMV, etc. (converted to base64)
+        - Documents: PDF, CSV, DOCX, TXT, JSON (loaded into knowledge base)
+
+    Note:
+        At least one of agents, teams, or workflows must be provided during initialization.
+        All components are automatically initialized and registered with the platform when served.
+    """
     type = "fastapi"
 
     def __init__(
