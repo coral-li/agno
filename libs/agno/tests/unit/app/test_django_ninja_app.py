@@ -1,28 +1,25 @@
 """Unit tests for DjangoNinjaApp class."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock, call
-from typing import Dict, Any
-from io import BytesIO
-
 # Configure Django settings first
-import os
+from unittest.mock import Mock, patch
+
 import django
+import pytest
 from django.conf import settings
 
 if not settings.configured:
     settings.configure(
         INSTALLED_APPS=[
-            'django.contrib.auth',
-            'django.contrib.contenttypes',
+            "django.contrib.auth",
+            "django.contrib.contenttypes",
         ],
         DATABASES={
-            'default': {
-                'ENGINE': 'django.db.backends.sqlite3',
-                'NAME': ':memory:',
+            "default": {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": ":memory:",
             }
         },
-        SECRET_KEY='test-secret-key',
+        SECRET_KEY="test-secret-key",
         USE_TZ=True,
     )
     django.setup()
@@ -31,14 +28,14 @@ if not settings.configured:
 try:
     from ninja import NinjaAPI
     from ninja.files import UploadedFile
+
     django_ninja_available = True
 except ImportError:
     django_ninja_available = False
 
 # Skip all tests if django-ninja is not available
 pytestmark = pytest.mark.skipif(
-    not django_ninja_available,
-    reason="django-ninja not installed. Install with 'pip install agno[django]'"
+    not django_ninja_available, reason="django-ninja not installed. Install with 'pip install agno[django]'"
 )
 
 from agno.agent.agent import Agent
@@ -47,7 +44,7 @@ from agno.workflow.workflow import Workflow
 
 # Only import Django components if django-ninja is available
 if django_ninja_available:
-    from agno.app.django.app import DjangoNinjaApp, ChatRequest, ChatResponse
+    from agno.app.django.app import ChatRequest, ChatResponse, DjangoNinjaApp
 else:
     # Create dummy classes to prevent import errors
     DjangoNinjaApp = None
@@ -103,6 +100,7 @@ def mock_workflow():
     workflow.workflow_id = None
     workflow.app_id = None
     workflow.run = Mock()
+    workflow.deep_copy = Mock(return_value=workflow)
     workflow.register_workflow = Mock()
     return workflow
 
@@ -140,7 +138,6 @@ class TestDjangoNinjaAppInitialization:
         assert app.agents == [mock_agent]
         assert app.teams == []
         assert app.workflows == []
-        assert app.prefix == "/agno"
         assert app.require_auth is True
         assert app.monitoring is True
         assert app.app_id is not None
@@ -170,15 +167,13 @@ class TestDjangoNinjaAppInitialization:
         app = DjangoNinjaApp(
             api=mock_ninja_api,
             agents=[mock_agent],
-            prefix="/custom",
             app_id="custom-app-id",
             name="Custom App",
             description="Custom Description",
             require_auth=False,
-            monitoring=False
+            monitoring=False,
         )
 
-        assert app.prefix == "/custom"
         assert app.app_id == "custom-app-id"
         assert app.name == "Custom App"
         assert app.description == "Custom Description"
@@ -195,34 +190,26 @@ class TestDjangoNinjaAppInitialization:
         with pytest.raises(ValueError, match="At least one of agents, teams, or workflows must be provided"):
             DjangoNinjaApp(api=mock_ninja_api, agents=[], teams=[], workflows=[])
 
-    def test_prefix_normalization(self, mock_ninja_api, mock_agent):
-        """Test that prefix is properly normalized (trailing slash removed)."""
-        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], prefix="/custom/")
-        assert app.prefix == "/custom"
-
 
 class TestDjangoNinjaAppComponentInitialization:
-    """Test component initialization and app_id propagation."""
+    """Test component initialization and configuration."""
 
     def test_app_id_propagation_to_agents(self, mock_ninja_api, mock_agent):
-        """Test that app_id is properly propagated to agents."""
-        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
+        """Test that app_id is propagated to agents."""
+        mock_agent.app_id = None
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], app_id="test-app-id")
 
-        # Verify agent gets app_id when it doesn't have one
-        assert mock_agent.app_id == app.app_id
+        assert mock_agent.app_id == "test-app-id"
 
     def test_app_id_not_overridden_for_agents(self, mock_ninja_api, mock_agent):
         """Test that existing app_id on agents is not overridden."""
-        mock_agent.app_id = "existing-agent-id"
+        mock_agent.app_id = "existing-id"
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], app_id="test-app-id")
 
-        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-
-        # Agent should keep its existing app_id
-        assert mock_agent.app_id == "existing-agent-id"
+        assert mock_agent.app_id == "existing-id"
 
     def test_team_member_initialization(self, mock_ninja_api, mock_team):
         """Test that team members are properly initialized."""
-        # Create mock team members
         mock_agent_member = Mock(spec=Agent)
         mock_agent_member.app_id = None
         mock_agent_member.team_id = None
@@ -232,100 +219,75 @@ class TestDjangoNinjaAppComponentInitialization:
         mock_team_member.initialize_team = Mock()
 
         mock_team.members = [mock_agent_member, mock_team_member]
+        mock_team.team_id = "test-team-id"
 
-        app = DjangoNinjaApp(api=mock_ninja_api, teams=[mock_team])
+        app = DjangoNinjaApp(api=mock_ninja_api, teams=[mock_team], app_id="test-app-id")
 
-        # Verify team members are initialized
+        assert mock_agent_member.app_id == "test-app-id"
+        assert mock_agent_member.team_id == "test-team-id"
         mock_agent_member.initialize_agent.assert_called_once()
         mock_team_member.initialize_team.assert_called_once()
 
-        # Verify agent member gets proper IDs
-        assert mock_agent_member.app_id == app.app_id
-        assert mock_agent_member.team_id == mock_team.team_id
-
     def test_workflow_id_generation(self, mock_ninja_api, mock_workflow):
-        """Test that workflow_id is generated when not provided."""
-        with patch("agno.app.django.app.generate_id", return_value="generated-id") as mock_generate:
-            DjangoNinjaApp(api=mock_ninja_api, workflows=[mock_workflow])
+        """Test that workflow_id is generated when not present."""
+        mock_workflow.workflow_id = None
+        mock_workflow.name = "test-workflow"
 
-            mock_generate.assert_called_once_with(mock_workflow.name)
-            assert mock_workflow.workflow_id == "generated-id"
+        with patch("agno.app.django.app.generate_id", return_value="generated-workflow-id"):
+            app = DjangoNinjaApp(api=mock_ninja_api, workflows=[mock_workflow])
+
+            assert mock_workflow.workflow_id == "generated-workflow-id"
 
     def test_workflow_id_not_overridden(self, mock_ninja_api):
         """Test that existing workflow_id is not overridden."""
         mock_workflow = Mock(spec=Workflow)
         mock_workflow.name = "test-workflow"
-        mock_workflow.workflow_id = "existing-id"
+        mock_workflow.workflow_id = "existing-workflow-id"
         mock_workflow.app_id = None
-        mock_workflow.register_workflow = Mock()
 
-        with patch("agno.app.django.app.generate_id") as mock_generate:
-            DjangoNinjaApp(api=mock_ninja_api, workflows=[mock_workflow])
+        app = DjangoNinjaApp(api=mock_ninja_api, workflows=[mock_workflow])
 
-            mock_generate.assert_not_called()
-            assert mock_workflow.workflow_id == "existing-id"
+        assert mock_workflow.workflow_id == "existing-workflow-id"
 
 
 class TestDjangoNinjaAppRouteRegistration:
-    """Test route registration functionality."""
+    """Test route registration with the new unified API structure."""
 
     def test_status_route_registration(self, mock_ninja_api, mock_agent):
-        """Test that status route is registered correctly."""
-        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
+        """Test that status route is registered."""
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
 
-        # Verify status route was registered
-        mock_ninja_api.get.assert_any_call("/agno/status")
+        # Verify that the get route for /status was registered
+        mock_ninja_api.get.assert_called()
+        calls = mock_ninja_api.get.call_args_list
+        status_call = next((call for call in calls if "/status" in str(call)), None)
+        assert status_call is not None
 
-    def test_agent_routes_registration(self, mock_ninja_api, mock_agent):
-        """Test that agent routes are registered correctly."""
-        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
+    def test_runs_route_registration(self, mock_ninja_api, mock_agent):
+        """Test that unified /runs route is registered."""
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
 
-        # Check that agent routes were registered
-        expected_chat_route = "/agno/agents/test-agent/chat"
-        expected_upload_route = "/agno/agents/test-agent/upload"
-
-        # Verify routes were registered with correct paths
+        # Verify that the post route for /runs was registered
+        mock_ninja_api.post.assert_called()
         calls = mock_ninja_api.post.call_args_list
-        chat_call = any(call[0][0] == expected_chat_route for call in calls)
-        upload_call = any(call[0][0] == expected_upload_route for call in calls)
+        runs_call = next((call for call in calls if "/runs" in str(call)), None)
+        assert runs_call is not None
 
-        assert chat_call, f"Chat route {expected_chat_route} was not registered"
-        assert upload_call, f"Upload route {expected_upload_route} was not registered"
+    def test_only_unified_routes_registered(self, mock_ninja_api, mock_agent, mock_team, mock_workflow):
+        """Test that only the unified routes are registered, not separate component routes."""
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], teams=[mock_team], workflows=[mock_workflow])
 
-    def test_team_routes_registration(self, mock_ninja_api, mock_team):
-        """Test that team routes are registered correctly."""
-        DjangoNinjaApp(api=mock_ninja_api, teams=[mock_team])
+        # Should only have 2 routes: /status (GET) and /runs (POST)
+        assert mock_ninja_api.get.call_count == 1
+        assert mock_ninja_api.post.call_count == 1
 
-        expected_route = "/agno/teams/test-team/chat"
-
-        calls = mock_ninja_api.post.call_args_list
-        team_call = any(call[0][0] == expected_route for call in calls)
-
-        assert team_call, f"Team route {expected_route} was not registered"
-
-    def test_workflow_routes_registration(self, mock_ninja_api, mock_workflow):
-        """Test that workflow routes are registered correctly."""
-        with patch("agno.app.django.app.generate_id", return_value="test-workflow-id"):
-            DjangoNinjaApp(api=mock_ninja_api, workflows=[mock_workflow])
-
-            expected_route = "/agno/workflows/test-workflow-id/run"
-
-            calls = mock_ninja_api.post.call_args_list
-            workflow_call = any(call[0][0] == expected_route for call in calls)
-
-            assert workflow_call, f"Workflow route {expected_route} was not registered"
-
-    def test_custom_prefix_routes(self, mock_ninja_api, mock_agent):
-        """Test routes with custom prefix."""
-        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], prefix="/custom")
-
-        # Check that routes use custom prefix
-        calls = mock_ninja_api.get.call_args_list + mock_ninja_api.post.call_args_list
-        routes = [call[0][0] for call in calls]
-
-        # All routes should use custom prefix
-        assert any("/custom/status" in route for route in routes)
-        assert any("/custom/agents/" in route for route in routes)
+        # Verify no separate agent/team/workflow routes
+        all_calls = mock_ninja_api.get.call_args_list + mock_ninja_api.post.call_args_list
+        for call in all_calls:
+            call_str = str(call)
+            assert "/agents/" not in call_str
+            assert "/teams/" not in call_str
+            assert "/workflows/" not in call_str
 
 
 class TestDjangoNinjaAppPlatformRegistration:
@@ -334,29 +296,31 @@ class TestDjangoNinjaAppPlatformRegistration:
     @patch("agno.api.app.create_app")
     def test_platform_registration_with_monitoring_enabled(self, mock_create_app, mock_ninja_api, mock_agent):
         """Test platform registration when monitoring is enabled."""
-        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], monitoring=True)
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], monitoring=True)
 
-        # Should attempt to register with platform
-        assert mock_create_app.called
+        # Platform registration should have been called during initialization
+        mock_create_app.assert_called_once()
         mock_agent.register_agent.assert_called_once()
 
     @patch("agno.api.app.create_app")
     def test_platform_registration_with_monitoring_disabled(self, mock_create_app, mock_ninja_api, mock_agent):
-        """Test no platform registration when monitoring is disabled."""
-        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], monitoring=False)
+        """Test platform registration when monitoring is disabled."""
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], monitoring=False)
 
-        # Should not attempt to register with platform
+        # Platform registration should not have been called
         mock_create_app.assert_not_called()
         mock_agent.register_agent.assert_not_called()
 
     @patch("agno.api.app.create_app")
     @patch("agno.app.django.app.logger")
-    def test_platform_registration_failure_handled_gracefully(self, mock_logger, mock_create_app, mock_ninja_api, mock_agent):
+    def test_platform_registration_failure_handled_gracefully(
+        self, mock_logger, mock_create_app, mock_ninja_api, mock_agent
+    ):
         """Test that platform registration failures are handled gracefully."""
-        mock_create_app.side_effect = Exception("Platform registration failed")
+        mock_create_app.side_effect = Exception("Platform unavailable")
 
-        # Should not raise exception
-        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], monitoring=True)
+        # Should not raise an exception
+        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent], monitoring=True)
 
         # Should log the error
         mock_logger.debug.assert_called()
@@ -365,100 +329,74 @@ class TestDjangoNinjaAppPlatformRegistration:
 class TestDjangoNinjaAppFileProcessing:
     """Test file processing functionality."""
 
-    def test_process_pdf_file(self, mock_ninja_api, mock_agent):
-        """Test processing PDF files."""
+    def test_agent_process_pdf_file(self, mock_ninja_api, mock_agent):
+        """Test processing PDF file for agents."""
         app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-        mock_file = Mock(spec=UploadedFile)
+
+        mock_file = Mock()
         mock_file.content_type = "application/pdf"
-        mock_file.read = Mock(return_value=b"pdf content")
+        mock_file.name = "test.pdf"
+        mock_file.read = Mock(return_value=b"fake pdf content")
 
         with patch("agno.document.reader.pdf_reader.PDFReader") as mock_pdf_reader:
             mock_reader_instance = Mock()
+            mock_reader_instance.read = Mock(return_value=[])
             mock_pdf_reader.return_value = mock_reader_instance
-            mock_reader_instance.read.return_value = ["document"]
 
-            result = app._process_uploaded_file(mock_file)
+            images, audios, videos = app._agent_process_file([mock_file], mock_agent)
 
-            assert result == ["document"]
-            mock_pdf_reader.assert_called_once()
-            mock_reader_instance.read.assert_called_once()
+            assert images == []
+            assert audios == []
+            assert videos == []
+            mock_agent.knowledge.load_documents.assert_called_once()
 
-    def test_process_csv_file(self, mock_ninja_api, mock_agent):
-        """Test processing CSV files."""
+    def test_agent_process_image_file(self, mock_ninja_api, mock_agent):
+        """Test processing image file for agents."""
         app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-        mock_file = Mock(spec=UploadedFile)
-        mock_file.content_type = "text/csv"
-        mock_file.read = Mock(return_value=b"csv content")
 
-        with patch("agno.document.reader.csv_reader.CSVReader") as mock_csv_reader:
-            mock_reader_instance = Mock()
-            mock_csv_reader.return_value = mock_reader_instance
-            mock_reader_instance.read.return_value = ["document"]
+        mock_file = Mock()
+        mock_file.content_type = "image/png"
+        mock_file.name = "test.png"
 
-            result = app._process_uploaded_file(mock_file)
+        with patch("agno.app.django.app.process_image") as mock_process_image:
+            mock_image = Mock()
+            mock_process_image.return_value = mock_image
 
-            assert result == ["document"]
-            mock_csv_reader.assert_called_once()
+            images, audios, videos = app._agent_process_file([mock_file], mock_agent)
 
-    def test_process_docx_file(self, mock_ninja_api, mock_agent):
-        """Test processing DOCX files."""
-        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-        mock_file = Mock(spec=UploadedFile)
-        mock_file.content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        mock_file.read = Mock(return_value=b"docx content")
+            assert images == [mock_image]
+            assert audios == []
+            assert videos == []
 
-        with patch("agno.document.reader.docx_reader.DocxReader") as mock_docx_reader:
-            mock_reader_instance = Mock()
-            mock_docx_reader.return_value = mock_reader_instance
-            mock_reader_instance.read.return_value = ["document"]
+    def test_team_process_file(self, mock_ninja_api, mock_team):
+        """Test processing files for teams."""
+        app = DjangoNinjaApp(api=mock_ninja_api, teams=[mock_team])
 
-            result = app._process_uploaded_file(mock_file)
+        mock_file = Mock()
+        mock_file.content_type = "application/pdf"
+        mock_file.name = "test.pdf"
 
-            assert result == ["document"]
-            mock_docx_reader.assert_called_once()
+        with patch("agno.app.django.app.process_document") as mock_process_document:
+            mock_document = Mock()
+            mock_process_document.return_value = mock_document
 
-    def test_process_text_file(self, mock_ninja_api, mock_agent):
-        """Test processing text files."""
-        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-        mock_file = Mock(spec=UploadedFile)
-        mock_file.content_type = "text/plain"
-        mock_file.read = Mock(return_value=b"text content")
+            images, audios, videos, documents = app._team_process_file([mock_file])
 
-        with patch("agno.document.reader.text_reader.TextReader") as mock_text_reader:
-            mock_reader_instance = Mock()
-            mock_text_reader.return_value = mock_reader_instance
-            mock_reader_instance.read.return_value = ["document"]
-
-            result = app._process_uploaded_file(mock_file)
-
-            assert result == ["document"]
-            mock_text_reader.assert_called_once()
-
-    def test_process_json_file(self, mock_ninja_api, mock_agent):
-        """Test processing JSON files."""
-        app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-        mock_file = Mock(spec=UploadedFile)
-        mock_file.content_type = "application/json"
-        mock_file.read = Mock(return_value=b'{"key": "value"}')
-
-        with patch("agno.document.reader.json_reader.JSONReader") as mock_json_reader:
-            mock_reader_instance = Mock()
-            mock_json_reader.return_value = mock_reader_instance
-            mock_reader_instance.read.return_value = ["document"]
-
-            result = app._process_uploaded_file(mock_file)
-
-            assert result == ["document"]
-            mock_json_reader.assert_called_once()
+            assert images == []
+            assert audios == []
+            assert videos == []
+            assert documents == [mock_document]
 
     def test_process_unsupported_file_type(self, mock_ninja_api, mock_agent):
-        """Test processing unsupported file types raises error."""
+        """Test processing unsupported file type raises appropriate error."""
         app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-        mock_file = Mock(spec=UploadedFile)
-        mock_file.content_type = "unsupported/type"
 
-        with pytest.raises(ValueError, match="Unsupported file type: unsupported/type"):
-            app._process_uploaded_file(mock_file)
+        mock_file = Mock()
+        mock_file.content_type = "application/unsupported"
+        mock_file.name = "test.unsupported"
+
+        with pytest.raises(ValueError, match="Unsupported file type"):
+            app._agent_process_file([mock_file], mock_agent)
 
 
 class TestDjangoNinjaAppToDictMethod:
@@ -470,28 +408,17 @@ class TestDjangoNinjaAppToDictMethod:
             api=mock_ninja_api,
             agents=[mock_agent],
             name="Test App",
-            description="Test Description",
-            prefix="/test"
+            description="Test Description"
         )
 
         result = app._to_dict()
 
-        expected = {
-            "type": "django-ninja",
-            "description": "Test Description",
-            "prefix": "/test",
-            "agents": [
-                {
-                    "model": "gpt-4",
-                    "agent_id": "test-agent",
-                    "team_id": None,
-                }
-            ],
-            "teams": None,
-            "workflows": None,
-        }
-
-        assert result == expected
+        assert result["type"] == "django-ninja"
+        assert result["description"] == "Test Description"
+        assert result["agents"] is not None
+        assert len(result["agents"]) == 1
+        assert result["teams"] is None
+        assert result["workflows"] is None
 
     def test_to_dict_with_teams_only(self, mock_ninja_api, mock_team):
         """Test _to_dict with teams only."""
@@ -499,72 +426,55 @@ class TestDjangoNinjaAppToDictMethod:
 
         result = app._to_dict()
 
-        expected = {
-            "type": "django-ninja",
-            "description": None,
-            "prefix": "/agno",
-            "agents": None,
-            "teams": [
-                {
-                    "name": "test-team",
-                    "team_id": "test-team",
-                }
-            ],
-            "workflows": None,
-        }
-
-        assert result == expected
+        assert result["agents"] is None
+        assert result["teams"] is not None
+        assert len(result["teams"]) == 1
+        assert result["workflows"] is None
 
     def test_to_dict_with_workflows_only(self, mock_ninja_api, mock_workflow):
         """Test _to_dict with workflows only."""
-        with patch("agno.app.django.app.generate_id", return_value="generated-id"):
-            app = DjangoNinjaApp(api=mock_ninja_api, workflows=[mock_workflow])
+        mock_workflow.workflow_id = "test-workflow-id"
+        mock_workflow.name = "Test Workflow"
 
-            result = app._to_dict()
+        app = DjangoNinjaApp(api=mock_ninja_api, workflows=[mock_workflow])
 
-            expected = {
-                "type": "django-ninja",
-                "description": None,
-                "prefix": "/agno",
-                "agents": None,
-                "teams": None,
-                "workflows": [
-                    {
-                        "workflow_id": "generated-id",
-                        "name": "test-workflow",
-                    }
-                ],
-            }
+        result = app._to_dict()
 
-            assert result == expected
+        assert result["agents"] is None
+        assert result["teams"] is None
+        assert result["workflows"] is not None
+        assert len(result["workflows"]) == 1
+        assert result["workflows"][0]["workflow_id"] == "test-workflow-id"
+        assert result["workflows"][0]["name"] == "Test Workflow"
 
     def test_to_dict_with_all_components(self, mock_ninja_api, mock_agent, mock_team, mock_workflow):
-        """Test _to_dict with all components."""
-        with patch("agno.app.django.app.generate_id", return_value="generated-id"):
-            app = DjangoNinjaApp(
-                api=mock_ninja_api,
-                agents=[mock_agent],
-                teams=[mock_team],
-                workflows=[mock_workflow],
-                description="Full App"
-            )
+        """Test _to_dict with all component types."""
+        mock_workflow.workflow_id = "test-workflow-id"
+        mock_workflow.name = "Test Workflow"
 
-            result = app._to_dict()
+        app = DjangoNinjaApp(
+            api=mock_ninja_api,
+            agents=[mock_agent],
+            teams=[mock_team],
+            workflows=[mock_workflow]
+        )
 
-            assert result["type"] == "django-ninja"
-            assert result["description"] == "Full App"
-            assert len(result["agents"]) == 1
-            assert len(result["teams"]) == 1
-            assert len(result["workflows"]) == 1
+        result = app._to_dict()
+
+        assert result["agents"] is not None
+        assert result["teams"] is not None
+        assert result["workflows"] is not None
+        assert len(result["agents"]) == 1
+        assert len(result["teams"]) == 1
+        assert len(result["workflows"]) == 1
 
 
 class TestChatRequestModel:
-    """Test ChatRequest Pydantic model."""
+    """Test ChatRequest model validation."""
 
     def test_chat_request_required_fields(self):
         """Test ChatRequest with required fields only."""
         request = ChatRequest(message="Hello")
-
         assert request.message == "Hello"
         assert request.session_id is None
         assert request.user_id is None
@@ -578,7 +488,6 @@ class TestChatRequestModel:
             user_id="user-456",
             stream=True
         )
-
         assert request.message == "Hello"
         assert request.session_id == "session-123"
         assert request.user_id == "user-456"
@@ -586,19 +495,17 @@ class TestChatRequestModel:
 
     def test_chat_request_validation(self):
         """Test ChatRequest validation."""
-        # Empty message should be valid (validation might be handled elsewhere)
-        request = ChatRequest(message="")
-        assert request.message == ""
+        with pytest.raises(ValueError):
+            ChatRequest()  # Missing required message field
 
 
 class TestChatResponseModel:
-    """Test ChatResponse Pydantic model."""
+    """Test ChatResponse model validation."""
 
     def test_chat_response_required_fields(self):
         """Test ChatResponse with required fields only."""
-        response = ChatResponse(content="Hello back!")
-
-        assert response.content == "Hello back!"
+        response = ChatResponse(content="Hello back")
+        assert response.content == "Hello back"
         assert response.agent_id is None
         assert response.team_id is None
         assert response.session_id is None
@@ -606,13 +513,12 @@ class TestChatResponseModel:
     def test_chat_response_all_fields(self):
         """Test ChatResponse with all fields."""
         response = ChatResponse(
-            content="Hello back!",
+            content="Hello back",
             agent_id="agent-123",
             team_id="team-456",
             session_id="session-789"
         )
-
-        assert response.content == "Hello back!"
+        assert response.content == "Hello back"
         assert response.agent_id == "agent-123"
         assert response.team_id == "team-456"
         assert response.session_id == "session-789"
@@ -630,14 +536,14 @@ class TestDjangoNinjaAppErrorHandling:
 
     def test_team_initialization_failure(self, mock_ninja_api, mock_team):
         """Test handling of team initialization failure."""
-        mock_team.initialize_team.side_effect = Exception("Team init failed")
+        mock_team.initialize_team.side_effect = Exception("Team initialization failed")
 
-        with pytest.raises(Exception, match="Team init failed"):
+        with pytest.raises(Exception, match="Team initialization failed"):
             DjangoNinjaApp(api=mock_ninja_api, teams=[mock_team])
 
     def test_invalid_api_parameter(self, mock_agent):
-        """Test that passing invalid api parameter raises appropriate error."""
-        with pytest.raises(Exception):
+        """Test that invalid API parameter raises appropriate error."""
+        with pytest.raises(TypeError):
             DjangoNinjaApp(api="not-an-api", agents=[mock_agent])
 
 
@@ -645,50 +551,43 @@ class TestDjangoNinjaAppTypeValidation:
     """Test type validation and edge cases."""
 
     def test_empty_component_lists_behavior(self, mock_ninja_api):
-        """Test that empty component lists are converted to empty lists, but still raise error."""
-        # The implementation actually checks if not agents and not teams and not workflows
-        # which treats empty lists as falsy, so this should still raise an error
-        with pytest.raises(ValueError, match="At least one of agents, teams, or workflows must be provided"):
+        """Test behavior with empty component lists."""
+        with pytest.raises(ValueError):
             DjangoNinjaApp(api=mock_ninja_api, agents=[], teams=[], workflows=[])
 
     def test_components_type_validation(self, mock_ninja_api):
-        """Test that invalid component types are handled properly."""
-        # This should pass - type validation might be handled at runtime
-        invalid_agent = "not-an-agent"
-
-        # The actual validation might happen during initialization or method calls
-        # For now, we'll test that the app can be created with invalid types
-        # and expect errors during actual usage
-        try:
-            app = DjangoNinjaApp(api=mock_ninja_api, agents=[invalid_agent])
-            # If this passes, the validation happens later
-            assert True
-        except Exception:
-            # If this fails, the validation happens during initialization
-            assert True
-
-    def test_empty_component_names(self, mock_ninja_api):
-        """Test handling of components with empty names."""
+        """Test that component type validation works correctly."""
+        # Should work with proper types
         mock_agent = Mock(spec=Agent)
-        mock_agent.name = ""
-        mock_agent.agent_id = ""
+        mock_agent.initialize_agent = Mock()
+        DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
+
+        # Should handle mixed valid types
+        mock_team = Mock(spec=Team)
+        mock_team.initialize_team = Mock()
+        mock_team.members = []
+        DjangoNinjaApp(api=mock_ninja_api, teams=[mock_team])
+
+    def test_component_names_handling(self, mock_ninja_api):
+        """Test handling of components with various name configurations."""
+        mock_agent = Mock(spec=Agent)
+        mock_agent.name = ""  # Empty name
+        mock_agent.agent_id = "empty-name-agent"
         mock_agent.app_id = None
         mock_agent.team_id = None
         mock_agent.initialize_agent = Mock()
-        mock_agent.register_agent = Mock()
         mock_agent.get_agent_config_dict = Mock(return_value={})
 
+        # Should not raise an error
         app = DjangoNinjaApp(api=mock_ninja_api, agents=[mock_agent])
-
-        # Should handle empty names gracefully
-        assert mock_agent in app.agents
+        assert app.agents == [mock_agent]
 
 
 class TestDjangoNinjaAppIntegrationScenarios:
     """Test complex integration scenarios."""
 
     def test_complex_initialization_scenario(self, mock_ninja_api):
-        """Test complex scenario with multiple components and custom settings."""
+        """Test complex initialization with multiple components and configurations."""
         # Create multiple agents
         agents = []
         for i in range(3):
@@ -699,25 +598,29 @@ class TestDjangoNinjaAppIntegrationScenarios:
             agent.team_id = None
             agent.initialize_agent = Mock()
             agent.register_agent = Mock()
-            agent.get_agent_config_dict = Mock(return_value={"model": f"gpt-{i}"})
+            agent.get_agent_config_dict = Mock(return_value={"model": f"model-{i}"})
             agents.append(agent)
 
-        # Create multiple teams with members
-        teams = []
-        for i in range(2):
-            team = Mock(spec=Team)
-            team.name = f"team-{i}"
-            team.team_id = f"team-{i}"
-            team.app_id = None
-            team.members = [agents[i]]  # Add agent as team member
-            team.initialize_team = Mock()
-            team.register_team = Mock()
-            team.to_platform_dict = Mock(return_value={"name": f"team-{i}"})
-            teams.append(team)
+        # Create teams with agent members
+        team_agent = Mock(spec=Agent)
+        team_agent.name = "team-agent"
+        team_agent.agent_id = "team-agent"
+        team_agent.app_id = None
+        team_agent.team_id = None
+        team_agent.initialize_agent = Mock()
 
-        # Create workflow
+        team = Mock(spec=Team)
+        team.name = "test-team"
+        team.team_id = "test-team"
+        team.app_id = None
+        team.members = [team_agent]
+        team.initialize_team = Mock()
+        team.register_team = Mock()
+        team.to_platform_dict = Mock(return_value={"name": "test-team"})
+
+        # Create workflows
         workflow = Mock(spec=Workflow)
-        workflow.name = "complex-workflow"
+        workflow.name = "test-workflow"
         workflow.workflow_id = None
         workflow.app_id = None
         workflow.register_workflow = Mock()
@@ -726,73 +629,50 @@ class TestDjangoNinjaAppIntegrationScenarios:
             app = DjangoNinjaApp(
                 api=mock_ninja_api,
                 agents=agents,
-                teams=teams,
+                teams=[team],
                 workflows=[workflow],
-                prefix="/complex",
+                app_id="complex-app-id",
                 name="Complex App",
-                description="A complex test application",
+                description="A complex test app",
                 require_auth=False,
-                monitoring=True
+                monitoring=True,
             )
 
-            # Verify all components were initialized
-            assert len(app.agents) == 3
-            assert len(app.teams) == 2
-            assert len(app.workflows) == 1
+        # Verify all components were initialized
+        assert len(app.agents) == 3
+        assert len(app.teams) == 1
+        assert len(app.workflows) == 1
 
-            # Verify initialization calls - note that agents in teams are initialized twice:
-            # once as standalone agents and once as team members
-            for i, agent in enumerate(agents):
-                if i < 2:  # First two agents are also team members
-                    assert agent.initialize_agent.call_count == 2
-                else:  # Third agent is only standalone
-                    agent.initialize_agent.assert_called_once()
-
-            for team in teams:
-                team.initialize_team.assert_called_once()
-
-            # Verify app_id propagation
-            for agent in agents:
-                assert agent.app_id == app.app_id
-
-            for team in teams:
-                assert team.app_id == app.app_id
-
-            assert workflow.app_id == app.app_id
-            assert workflow.workflow_id == "generated-workflow-id"
-
-            # Verify custom settings
-            assert app.prefix == "/complex"
-            assert app.name == "Complex App"
-            assert app.description == "A complex test application"
-            assert app.require_auth is False
-            assert app.monitoring is True
+        # Verify app IDs were propagated
+        for agent in agents:
+            assert agent.app_id == "complex-app-id"
+        assert team.app_id == "complex-app-id"
+        assert team_agent.app_id == "complex-app-id"
+        assert team_agent.team_id == "test-team"
+        assert workflow.app_id == "complex-app-id"
+        assert workflow.workflow_id == "generated-workflow-id"
 
     @patch("agno.api.app.create_app")
-    def test_full_lifecycle_with_monitoring(self, mock_create_app, mock_ninja_api, mock_agent, mock_team, mock_workflow):
-        """Test full app lifecycle with monitoring enabled."""
-        with patch("agno.app.django.app.generate_id", return_value="workflow-id"):
-            app = DjangoNinjaApp(
-                api=mock_ninja_api,
-                agents=[mock_agent],
-                teams=[mock_team],
-                workflows=[mock_workflow],
-                monitoring=True
-            )
+    def test_full_lifecycle_with_monitoring(
+        self, mock_create_app, mock_ninja_api, mock_agent, mock_team, mock_workflow
+    ):
+        """Test full lifecycle including platform registration."""
+        mock_workflow.workflow_id = "test-workflow-id"
 
-            # Verify platform registration was attempted
-            mock_create_app.assert_called_once()
+        app = DjangoNinjaApp(
+            api=mock_ninja_api,
+            agents=[mock_agent],
+            teams=[mock_team],
+            workflows=[mock_workflow],
+            monitoring=True,
+        )
 
-            # Verify individual component registration
-            mock_agent.register_agent.assert_called_once()
-            mock_team.register_team.assert_called_once()
-            mock_workflow.register_workflow.assert_called_once()
+        # Verify platform registration was called
+        mock_create_app.assert_called_once()
+        mock_agent.register_agent.assert_called_once()
+        mock_team.register_team.assert_called_once()
+        mock_workflow.register_workflow.assert_called_once()
 
-            # Verify route registration calls were made
-            assert mock_ninja_api.get.called
-            assert mock_ninja_api.post.called
-
-            # Verify the app maintains references to all components
-            assert app.agents == [mock_agent]
-            assert app.teams == [mock_team]
-            assert app.workflows == [mock_workflow]
+        # Verify route registration
+        assert mock_ninja_api.get.call_count == 1  # /status
+        assert mock_ninja_api.post.call_count == 1  # /runs

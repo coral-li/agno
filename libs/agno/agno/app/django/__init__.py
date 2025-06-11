@@ -6,10 +6,8 @@ into Django projects using django-ninja for API routing.
 """
 
 try:
-    from .app import DjangoNinjaApp, ChatRequest, ChatResponse
+    from .app import ChatRequest, ChatResponse, DjangoNinjaApp
 
-    __all__ = ['DjangoNinjaApp', 'ChatRequest', 'ChatResponse']
+    __all__ = ["DjangoNinjaApp", "ChatRequest", "ChatResponse"]
 except ImportError:
-    raise ImportError(
-        "`django` and `django-ninja` not installed. Please install using `pip install agno[django]`"
-    )
+    raise ImportError("`django` and `django-ninja` not installed. Please install using `pip install agno[django]`")

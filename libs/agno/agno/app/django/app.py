@@ -1,22 +1,30 @@
-from typing import List, Optional, Dict, Any
-from uuid import uuid4
+import json
 import logging
+from dataclasses import asdict
+from io import BytesIO
+from typing import Any, Dict, List, Optional, cast
+from uuid import uuid4
 
 try:
-    from ninja import NinjaAPI
+    from django.http import StreamingHttpResponse, JsonResponse
+    from ninja import NinjaAPI, File, Form, Query
     from ninja.files import UploadedFile
 except ImportError:
-    raise ImportError(
-        "`django-ninja` not installed. Please install using `pip install agno[django]`"
-    )
+    raise ImportError("`django-ninja` not installed. Please install using `pip install agno[django]`")
 
 from pydantic import BaseModel
 
-from agno.agent.agent import Agent
+from agno.agent.agent import Agent, RunResponse
+from agno.app.playground.utils import process_audio, process_document, process_image, process_video
+from agno.app.utils import generate_id
+from agno.media import Audio, Image, Video
+from agno.media import File as FileMedia
+from agno.run.base import RunStatus
+from agno.run.response import RunResponseEvent
+from agno.run.team import RunResponseErrorEvent as TeamRunResponseErrorEvent
+from agno.run.team import TeamRunResponseEvent
 from agno.team.team import Team
 from agno.workflow.workflow import Workflow
-from agno.app.utils import generate_id
-from agno.utils.log import log_info
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +43,88 @@ class ChatResponse(BaseModel):
     session_id: Optional[str] = None
 
 
+def agent_chat_response_streamer(
+    agent: Agent,
+    message: str,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    images: Optional[List[Image]] = None,
+    audio: Optional[List[Audio]] = None,
+    videos: Optional[List[Video]] = None,
+):
+    """Generator for streaming agent responses."""
+    try:
+        run_response = agent.run(
+            message,
+            session_id=session_id,
+            user_id=user_id,
+            images=images,
+            audio=audio,
+            videos=videos,
+            stream=True,
+            stream_intermediate_steps=True,
+        )
+        for run_response_chunk in run_response:
+            run_response_chunk = cast(RunResponseEvent, run_response_chunk)
+            yield f"{run_response_chunk.to_json()}"
+    except Exception as e:
+        error_response = RunResponse(content=str(e), status=RunStatus.error)
+        yield f"{error_response.to_json()}"
+        return
+
+
+def team_chat_response_streamer(
+    team: Team,
+    message: str,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    images: Optional[List[Image]] = None,
+    audio: Optional[List[Audio]] = None,
+    videos: Optional[List[Video]] = None,
+    files: Optional[List[FileMedia]] = None,
+):
+    """Generator for streaming team responses."""
+    try:
+        run_response = team.run(
+            message,
+            session_id=session_id,
+            user_id=user_id,
+            images=images,
+            audio=audio,
+            videos=videos,
+            files=files,
+            stream=True,
+            stream_intermediate_steps=True,
+        )
+        for run_response_chunk in run_response:
+            run_response_chunk = cast(TeamRunResponseEvent, run_response_chunk)
+            yield f"{run_response_chunk.to_json()}"
+    except Exception as e:
+        error_response = TeamRunResponseErrorEvent(
+            content=str(e),
+        )
+        yield f"{error_response.to_json()}"
+        return
+
+
 class DjangoNinjaApp:
     """
     Django-Ninja integration for Agno AI components.
 
     Provides seamless integration of Agno agents, teams, and workflows into
-    Django projects using django-ninja for API routing. Works alongside existing
-    django-ninja routes and leverages Django's authentication and middleware systems.
+    Django projects using django-ninja for API routing. Exposes the same API
+    structure as the FastAPI integration.
+
+    API Endpoints:
+    - GET /status: API health check
+    - POST /runs: Universal endpoint for agent/team/workflow communication
 
     Features:
-    - Automatic route generation for agents, teams, and workflows
+    - Unified API endpoint matching FastAPI structure
     - Django authentication integration
     - File upload handling with Django's file system
     - Session management using Django sessions
+    - Streaming response support
     - Admin interface integration
     - Compatible with existing django-ninja APIs
 
@@ -71,12 +148,12 @@ class DjangoNinjaApp:
         agno_app = DjangoNinjaApp(
             api=api,
             agents=[agent],
-            prefix="/ai"
         )
 
         # Now available:
         # GET /users (existing)
-        # POST /ai/agents/assistant/chat (Agno-generated)
+        # GET /status (Agno status)
+        # POST /runs?agent_id=assistant (Agno universal endpoint)
         ```
     """
 
@@ -86,7 +163,6 @@ class DjangoNinjaApp:
         agents: Optional[List[Agent]] = None,
         teams: Optional[List[Team]] = None,
         workflows: Optional[List[Workflow]] = None,
-        prefix: str = "/agno",
         app_id: Optional[str] = None,
         name: Optional[str] = None,
         description: Optional[str] = None,
@@ -101,7 +177,6 @@ class DjangoNinjaApp:
             agents: List of Agent instances to expose
             teams: List of Team instances to expose
             workflows: List of Workflow instances to expose
-            prefix: URL prefix for all Agno routes (default: "/agno")
             app_id: Unique identifier for the application
             name: Human-readable name for the application
             description: Description of the application
@@ -115,7 +190,6 @@ class DjangoNinjaApp:
         self.agents = agents or []
         self.teams = teams or []
         self.workflows = workflows or []
-        self.prefix = prefix.rstrip('/')
         self.app_id = app_id or str(uuid4())
         self.name = name
         self.description = description
@@ -163,172 +237,328 @@ class DjangoNinjaApp:
     def _register_routes(self):
         """Register all routes with the NinjaAPI instance."""
         # Status endpoint
-        self._add_status_route()
+        @self.api.get("/status")
+        def status(request):
+            return {"status": "available"}
 
-        # Agent routes
-        for agent in self.agents:
-            self._add_agent_routes(agent)
-
-        # Team routes
-        for team in self.teams:
-            self._add_team_routes(team)
-
-        # Workflow routes
-        for workflow in self.workflows:
-            self._add_workflow_routes(workflow)
-
-    def _add_status_route(self):
-        """Add status endpoint."""
-        @self.api.get(f"{self.prefix}/status")
-        def agno_status(request):
-            return {
-                "status": "available",
-                "app_id": self.app_id,
-                "agents": len(self.agents),
-                "teams": len(self.teams),
-                "workflows": len(self.workflows)
-            }
-
-    def _add_agent_routes(self, agent: Agent):
-        """Add routes for a specific agent."""
-        agent_path = f"{self.prefix}/agents/{agent.agent_id}"
-
-        # Chat endpoint
-        @self.api.post(f"{agent_path}/chat", response=ChatResponse)
-        def agent_chat(request, data: ChatRequest):
+        # Universal runs endpoint
+        @self.api.post("/runs")
+        def run_agent_or_team_or_workflow(
+            request,
+            agent_id: Optional[str] = Query(None),
+            team_id: Optional[str] = Query(None),
+            workflow_id: Optional[str] = Query(None),
+            message: Optional[str] = Form(None),
+            stream: bool = Form(True),
+            monitor: bool = Form(False),
+            workflow_input: Optional[Dict[str, Any]] = Form(None),
+            session_id: Optional[str] = Form(None),
+            user_id: Optional[str] = Form(None),
+            files: Optional[List[UploadedFile]] = File(None),
+        ):
+            # Authentication check
             if self.require_auth and not request.user.is_authenticated:
-                return {"error": "Authentication required"}, 401
+                return JsonResponse({"error": "Authentication required"}, status=401)
+
+            # Session management
+            if session_id is not None and session_id != "":
+                logger.debug(f"Continuing session: {session_id}")
+            else:
+                logger.debug("Creating new session")
+                session_id = str(uuid4())
 
             # Use Django session for session_id if not provided
-            session_id = data.session_id or request.session.session_key
-            user_id = data.user_id or (str(request.user.id) if request.user.is_authenticated else None)
+            if not session_id:
+                session_id = request.session.session_key
 
-            try:
-                response = agent.run(
-                    data.message,
-                    session_id=session_id,
-                    user_id=user_id,
-                    stream=data.stream
-                )
+            # Use Django user for user_id if not provided
+            if not user_id and request.user.is_authenticated:
+                user_id = str(request.user.id)
 
-                return ChatResponse(
-                    content=response.content,
-                    agent_id=agent.agent_id,
-                    session_id=session_id
-                )
-            except Exception as e:
-                logger.error(f"Agent chat error: {e}")
-                return {"error": str(e)}, 500
+            # Validation: Only one of agent_id, team_id or workflow_id can be provided
+            if (agent_id and team_id) or (agent_id and workflow_id) or (team_id and workflow_id):
+                return JsonResponse({"error": "Only one of agent_id, team_id or workflow_id can be provided"}, status=400)
 
-        # File upload endpoint
-        @self.api.post(f"{agent_path}/upload")
-        def agent_upload(request, file: UploadedFile):
-            if self.require_auth and not request.user.is_authenticated:
-                return {"error": "Authentication required"}, 401
+            if not agent_id and not team_id and not workflow_id:
+                return JsonResponse({"error": "One of agent_id, team_id or workflow_id must be provided"}, status=400)
 
-            if not agent.knowledge:
-                return {"error": "Agent has no knowledge base configured"}, 400
+            # Find the component
+            agent = None
+            team = None
+            workflow = None
 
-            try:
-                # Process the uploaded file based on content type
-                documents = self._process_uploaded_file(file)
+            if agent_id and self.agents:
+                agent = next((a for a in self.agents if a.agent_id == agent_id), None)
+                if agent is None:
+                    return JsonResponse({"error": "Agent not found"}, status=404)
+                if not message:
+                    return JsonResponse({"error": "Message is required"}, status=400)
 
-                # Add to agent's knowledge base
-                agent.knowledge.load_documents(documents)
+            if team_id and self.teams:
+                team = next((t for t in self.teams if t.team_id == team_id), None)
+                if team is None:
+                    return JsonResponse({"error": "Team not found"}, status=404)
+                if not message:
+                    return JsonResponse({"error": "Message is required"}, status=400)
 
-                return {
-                    "message": f"File {file.name} uploaded successfully",
-                    "agent_id": agent.agent_id
-                }
-            except Exception as e:
-                logger.error(f"File upload error: {e}")
-                return {"error": str(e)}, 500
+            if workflow_id and self.workflows:
+                workflow = next((w for w in self.workflows if w.workflow_id == workflow_id), None)
+                if workflow is None:
+                    return JsonResponse({"error": "Workflow not found"}, status=404)
+                if not workflow_input:
+                    return JsonResponse({"error": "Workflow input is required"}, status=400)
 
-    def _add_team_routes(self, team: Team):
-        """Add routes for a specific team."""
-        team_path = f"{self.prefix}/teams/{team.team_id}"
+            # Set monitoring
+            if agent:
+                agent.monitoring = bool(monitor)
+            elif team:
+                team.monitoring = bool(monitor)
+            elif workflow:
+                workflow.monitoring = bool(monitor)
 
-        @self.api.post(f"{team_path}/chat", response=ChatResponse)
-        def team_chat(request, data: ChatRequest):
-            if self.require_auth and not request.user.is_authenticated:
-                return {"error": "Authentication required"}, 401
+            # Process files
+            base64_images: List[Image] = []
+            base64_audios: List[Audio] = []
+            base64_videos: List[Video] = []
+            document_files: List[FileMedia] = []
 
-            session_id = data.session_id or request.session.session_key
-            user_id = data.user_id or (str(request.user.id) if request.user.is_authenticated else None)
+            if files:
+                if agent:
+                    base64_images, base64_audios, base64_videos = self._agent_process_file(files, agent)
+                elif team:
+                    base64_images, base64_audios, base64_videos, document_files = self._team_process_file(files)
 
-            try:
-                response = team.run(
-                    data.message,
-                    session_id=session_id,
-                    user_id=user_id,
-                    stream=data.stream
-                )
+            # Execute the component
+            if stream:
+                if agent:
+                    response = StreamingHttpResponse(
+                        agent_chat_response_streamer(
+                            agent,
+                            message,
+                            session_id=session_id,
+                            user_id=user_id,
+                            images=base64_images if base64_images else None,
+                            audio=base64_audios if base64_audios else None,
+                            videos=base64_videos if base64_videos else None,
+                        ),
+                        content_type="application/json",
+                    )
+                    response['Cache-Control'] = 'no-cache'
+                    return response
+                elif team:
+                    response = StreamingHttpResponse(
+                        team_chat_response_streamer(
+                            team,
+                            message,
+                            session_id=session_id,
+                            user_id=user_id,
+                            images=base64_images if base64_images else None,
+                            audio=base64_audios if base64_audios else None,
+                            videos=base64_videos if base64_videos else None,
+                            files=document_files if document_files else None,
+                        ),
+                        content_type="application/json",
+                    )
+                    response['Cache-Control'] = 'no-cache'
+                    return response
+                elif workflow:
+                    workflow_instance = workflow.deep_copy(update={"workflow_id": workflow_id})
+                    workflow_instance.user_id = user_id
+                    workflow_instance.session_name = None
 
-                return ChatResponse(
-                    content=response.content,
-                    team_id=team.team_id,
-                    session_id=session_id
-                )
-            except Exception as e:
-                logger.error(f"Team chat error: {e}")
-                return {"error": str(e)}, 500
+                    def workflow_streamer():
+                        for result in workflow_instance.run(**(workflow_input or {})):
+                            yield f"data: {json.dumps(asdict(result))}\n\n"
 
-    def _add_workflow_routes(self, workflow: Workflow):
-        """Add routes for a specific workflow."""
-        workflow_path = f"{self.prefix}/workflows/{workflow.workflow_id}"
+                    response = StreamingHttpResponse(
+                        workflow_streamer(),
+                        content_type="application/json",
+                    )
+                    response['Cache-Control'] = 'no-cache'
+                    return response
+            else:
+                if agent:
+                    run_response = cast(
+                        RunResponse,
+                        agent.run(
+                            message=message,
+                            session_id=session_id,
+                            user_id=user_id,
+                            images=base64_images if base64_images else None,
+                            audio=base64_audios if base64_audios else None,
+                            videos=base64_videos if base64_videos else None,
+                            stream=False,
+                        ),
+                    )
+                    return run_response.to_dict()
+                elif team:
+                    team_run_response = team.run(
+                        message=message,
+                        session_id=session_id,
+                        user_id=user_id,
+                        images=base64_images if base64_images else None,
+                        audio=base64_audios if base64_audios else None,
+                        videos=base64_videos if base64_videos else None,
+                        files=document_files if document_files else None,
+                        stream=False,
+                    )
+                    return team_run_response.to_dict()
+                elif workflow:
+                    workflow_instance = workflow.deep_copy(update={"workflow_id": workflow_id})
+                    workflow_instance.user_id = user_id
+                    workflow_instance.session_name = None
+                    return workflow_instance.run(**(workflow_input or {})).to_dict()
 
-        @self.api.post(f"{workflow_path}/run")
-        def workflow_run(request, data: Dict[str, Any]):
-            if self.require_auth and not request.user.is_authenticated:
-                return {"error": "Authentication required"}, 401
+    def _agent_process_file(self, files: List[UploadedFile], agent: Agent):
+        """Process uploaded files for agents."""
+        base64_images: List[Image] = []
+        base64_audios: List[Audio] = []
+        base64_videos: List[Video] = []
 
-            try:
-                result = workflow.run(data)
-                return {
-                    "result": result,
-                    "workflow_id": workflow.workflow_id
-                }
-            except Exception as e:
-                logger.error(f"Workflow run error: {e}")
-                return {"error": str(e)}, 500
+        for file in files:
+            logger.info(f"Processing file: {file.content_type}")
+            if file.content_type in ["image/png", "image/jpeg", "image/jpg", "image/webp"]:
+                try:
+                    base64_image = process_image(file)
+                    base64_images.append(base64_image)
+                except Exception as e:
+                    logger.error(f"Error processing image {file.name}: {e}")
+                    continue
+            elif file.content_type in ["audio/wav", "audio/mp3", "audio/mpeg"]:
+                try:
+                    base64_audio = process_audio(file)
+                    base64_audios.append(base64_audio)
+                except Exception as e:
+                    logger.error(f"Error processing audio {file.name}: {e}")
+                    continue
+            elif file.content_type in [
+                "video/x-flv",
+                "video/quicktime",
+                "video/mpeg",
+                "video/mpegs",
+                "video/mpgs",
+                "video/mpg",
+                "video/mp4",
+                "video/webm",
+                "video/wmv",
+                "video/3gpp",
+            ]:
+                try:
+                    base64_video = process_video(file)
+                    base64_videos.append(base64_video)
+                except Exception as e:
+                    logger.error(f"Error processing video {file.name}: {e}")
+                    continue
+            else:
+                # Process documents for knowledge base
+                if agent.knowledge is None:
+                    raise ValueError("KnowledgeBase not found")
 
-    def _process_uploaded_file(self, file: UploadedFile):
-        """Process uploaded file based on content type."""
-        from io import BytesIO
+                try:
+                    if file.content_type == "application/pdf":
+                        from agno.document.reader.pdf_reader import PDFReader
+                        contents = file.read()
+                        pdf_file = BytesIO(contents)
+                        pdf_file.name = file.name
+                        file_content = PDFReader().read(pdf_file)
+                        agent.knowledge.load_documents(file_content)
+                    elif file.content_type == "text/csv":
+                        from agno.document.reader.csv_reader import CSVReader
+                        contents = file.read()
+                        csv_file = BytesIO(contents)
+                        csv_file.name = file.name
+                        file_content = CSVReader().read(csv_file)
+                        agent.knowledge.load_documents(file_content)
+                    elif file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                        from agno.document.reader.docx_reader import DocxReader
+                        contents = file.read()
+                        docx_file = BytesIO(contents)
+                        docx_file.name = file.name
+                        file_content = DocxReader().read(docx_file)
+                        agent.knowledge.load_documents(file_content)
+                    elif file.content_type == "text/plain":
+                        from agno.document.reader.text_reader import TextReader
+                        contents = file.read()
+                        text_file = BytesIO(contents)
+                        text_file.name = file.name
+                        file_content = TextReader().read(text_file)
+                        agent.knowledge.load_documents(file_content)
+                    elif file.content_type == "application/json":
+                        from agno.document.reader.json_reader import JSONReader
+                        contents = file.read()
+                        json_file = BytesIO(contents)
+                        json_file.name = file.name
+                        file_content = JSONReader().read(json_file)
+                        agent.knowledge.load_documents(file_content)
+                    else:
+                        raise ValueError(f"Unsupported file type: {file.content_type}")
+                except Exception as e:
+                    logger.error(f"Error processing document {file.name}: {e}")
+                    continue
 
-        if file.content_type == "application/pdf":
-            from agno.document.reader.pdf_reader import PDFReader
-            return PDFReader().read(BytesIO(file.read()))
+        return base64_images, base64_audios, base64_videos
 
-        elif file.content_type == "text/csv":
-            from agno.document.reader.csv_reader import CSVReader
-            return CSVReader().read(BytesIO(file.read()))
+    def _team_process_file(self, files: List[UploadedFile]):
+        """Process uploaded files for teams."""
+        base64_images: List[Image] = []
+        base64_audios: List[Audio] = []
+        base64_videos: List[Video] = []
+        document_files: List[FileMedia] = []
 
-        elif file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            from agno.document.reader.docx_reader import DocxReader
-            return DocxReader().read(BytesIO(file.read()))
+        for file in files:
+            if file.content_type in ["image/png", "image/jpeg", "image/jpg", "image/webp"]:
+                try:
+                    base64_image = process_image(file)
+                    base64_images.append(base64_image)
+                except Exception as e:
+                    logger.error(f"Error processing image {file.name}: {e}")
+                    continue
+            elif file.content_type in ["audio/wav", "audio/mp3", "audio/mpeg"]:
+                try:
+                    base64_audio = process_audio(file)
+                    base64_audios.append(base64_audio)
+                except Exception as e:
+                    logger.error(f"Error processing audio {file.name}: {e}")
+                    continue
+            elif file.content_type in [
+                "video/x-flv",
+                "video/quicktime",
+                "video/mpeg",
+                "video/mpegs",
+                "video/mpgs",
+                "video/mpg",
+                "video/mp4",
+                "video/webm",
+                "video/wmv",
+                "video/3gpp",
+            ]:
+                try:
+                    base64_video = process_video(file)
+                    base64_videos.append(base64_video)
+                except Exception as e:
+                    logger.error(f"Error processing video {file.name}: {e}")
+                    continue
+            elif file.content_type in [
+                "application/pdf",
+                "text/csv",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "text/plain",
+                "application/json",
+            ]:
+                document_file = process_document(file)
+                if document_file is not None:
+                    document_files.append(document_file)
+            else:
+                raise ValueError(f"Unsupported file type: {file.content_type}")
 
-        elif file.content_type == "text/plain":
-            from agno.document.reader.text_reader import TextReader
-            return TextReader().read(BytesIO(file.read()))
-
-        elif file.content_type == "application/json":
-            from agno.document.reader.json_reader import JSONReader
-            return JSONReader().read(BytesIO(file.read()))
-
-        else:
-            raise ValueError(f"Unsupported file type: {file.content_type}")
+        return base64_images, base64_audios, base64_videos, document_files
 
     def _register_on_platform(self):
         """Register the app with Agno platform for monitoring."""
         try:
             from agno.api.app import AppCreate, create_app
 
-            create_app(app=AppCreate(
-                name=self.name or "Django Ninja App",
-                app_id=self.app_id,
-                config=self._to_dict()
-            ))
+            create_app(app=AppCreate(name=self.name or "Django Ninja App", app_id=self.app_id, config=self._to_dict()))
 
             # Register individual components
             for agent in self.agents:
@@ -348,7 +578,6 @@ class DjangoNinjaApp:
         return {
             "type": "django-ninja",
             "description": self.description,
-            "prefix": self.prefix,
             "agents": [
                 {
                     **agent.get_agent_config_dict(),
@@ -356,19 +585,25 @@ class DjangoNinjaApp:
                     "team_id": agent.team_id,
                 }
                 for agent in self.agents
-            ] if self.agents else None,
+            ]
+            if self.agents
+            else None,
             "teams": [
                 {
                     **team.to_platform_dict(),
                     "team_id": team.team_id,
                 }
                 for team in self.teams
-            ] if self.teams else None,
+            ]
+            if self.teams
+            else None,
             "workflows": [
                 {
                     "workflow_id": workflow.workflow_id,
                     "name": workflow.name,
                 }
                 for workflow in self.workflows
-            ] if self.workflows else None,
+            ]
+            if self.workflows
+            else None,
         }
