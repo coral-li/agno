@@ -8,7 +8,7 @@ docker==7.1.0
     # via agno-docker (libs/agno_docker/pyproject.toml)
 idna==3.10
     # via requests
-requests==2.32.3
+requests==2.33.0
     # via docker
 urllib3==2.3.0
     # via
